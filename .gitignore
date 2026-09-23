@@ -1,3 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Node
+node_modules/
+dist/
+
+# Build
+build/
+*.egg-info/
+
+# Test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Airflow
+airflow/logs/
+airflow/airflow.db/
+airflow/.venv/
+
+# Databricks
+.databricks/
+
+# Temporary
+tmp/
+temp/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
