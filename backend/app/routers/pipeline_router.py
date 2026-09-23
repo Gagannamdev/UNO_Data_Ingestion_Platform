@@ -124,3 +124,20 @@ async def preview_pipeline(
         role=user["role"],
         limit=request.limit,
     )
+
+@router.post(
+    "/{pipeline_id}/execute",
+)
+async def execute_pipeline(
+    pipeline_id: str,
+    user: dict = Depends(get_token_payload),
+):
+
+    return await PipelineService.execute_pipeline(
+        pipeline_id=pipeline_id,
+        user_id=user["sub"],
+        role=user["role"],
+    )
+
+
+

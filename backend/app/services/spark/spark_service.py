@@ -1,5 +1,7 @@
+import os
 from typing import Any
 
+from pyspark.sql import DataFrame
 from pyspark.sql import SparkSession
 
 from app.constants.messages import ErrorMessages
@@ -14,6 +16,18 @@ class SparkService:
     def get_spark(cls) -> SparkSession:
         if cls._spark is None:
             try:
+                python_executable = os.path.abspath(
+                    os.sys.executable
+                )
+
+                os.environ["PYSPARK_PYTHON"] = (
+                    python_executable
+                )
+
+                os.environ["PYSPARK_DRIVER_PYTHON"] = (
+                    python_executable
+                )
+
                 cls._spark = (
                     SparkSession.builder
                     .appName(
@@ -23,6 +37,14 @@ class SparkService:
                     .config(
                         "spark.sql.shuffle.partitions",
                         "4",
+                    )
+                    .config(
+                        "spark.pyspark.python",
+                        python_executable,
+                    )
+                    .config(
+                        "spark.pyspark.driver.python",
+                        python_executable,
                     )
                     .getOrCreate()
                 )
@@ -50,7 +72,8 @@ class SparkService:
     def create_dataframe(
         cls,
         rows: list[dict[str, Any]],
-    ):
+    ) -> DataFrame:
+
         try:
             spark = cls.get_spark()
 
@@ -76,27 +99,27 @@ class SparkService:
     @classmethod
     def preview_transformation(
         cls,
-        rows: list[dict[str, Any]],
-        queries: list[str],
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-
+        rows,
+        queries,
+        limit=20,
+    ):
         if not queries:
             return rows[:limit]
 
         dataframe = cls.create_dataframe(rows)
 
         try:
+            spark = cls.get_spark()
+
             dataframe.createOrReplaceTempView(
                 "source_data"
             )
-
-            spark = cls.get_spark()
 
             for index, query in enumerate(
                 queries,
                 start=1,
             ):
+
                 result = spark.sql(query)
 
                 view_name = f"step_{index}"
@@ -109,7 +132,9 @@ class SparkService:
 
             return [
                 row.asDict()
-                for row in dataframe.limit(limit).collect()
+                for row in dataframe
+                .limit(limit)
+                .collect()
             ]
 
         except Exception as exc:
@@ -122,10 +147,10 @@ class SparkService:
     @classmethod
     def preview_steps(
         cls,
-        rows: list[dict[str, Any]],
-        steps: list[dict],
-        limit: int = 20,
-    ) -> list[dict]:
+        rows,
+        steps,
+        limit=20,
+    ):
 
         if not steps:
             return []
@@ -145,7 +170,12 @@ class SparkService:
                 steps,
                 start=1,
             ):
-                query = step["query"]
+
+                query = (
+                    step["query"]
+                    if isinstance(step, dict)
+                    else step.query
+                )
 
                 result = spark.sql(query)
 
@@ -157,12 +187,18 @@ class SparkService:
 
                 preview_data = [
                     row.asDict()
-                    for row in result.limit(limit).collect()
+                    for row in result
+                    .limit(limit)
+                    .collect()
                 ]
 
                 previews.append(
                     {
-                        "step_name": step["step_name"],
+                        "step_name": (
+                            step["step_name"]
+                            if isinstance(step, dict)
+                            else step.step_name
+                        ),
                         "data": preview_data,
                     }
                 )
@@ -170,6 +206,71 @@ class SparkService:
                 dataframe = result
 
             return previews
+
+        except Exception as exc:
+            raise AppException(
+                message=ErrorMessages.TRANSFORMATION_FAILED,
+                status_code=422,
+                error_code="TRANSFORMATION_FAILED",
+            ) from exc
+
+    @classmethod
+    def execute_steps(
+        cls,
+        rows: list[dict[str, Any]],
+        steps,
+    ) -> DataFrame:
+
+        if not rows:
+            raise AppException(
+                message=ErrorMessages.NO_SOURCE_DATA,
+                status_code=422,
+                error_code="NO_SOURCE_DATA",
+            )
+
+        dataframe = cls.create_dataframe(rows)
+
+        try:
+            spark = cls.get_spark()
+
+            # Source data is available to the
+            # first transformation as source_data.
+            dataframe.createOrReplaceTempView(
+                "source_data"
+            )
+
+            # If there are no transformation steps,
+            # return the original source dataframe.
+            if not steps:
+                return dataframe
+
+            for index, step in enumerate(
+                steps,
+                start=1,
+            ):
+
+                query = (
+                    step["query"]
+                    if isinstance(step, dict)
+                    else step.query
+                )
+
+                result = spark.sql(query)
+
+                view_name = f"step_{index}"
+
+                result.createOrReplaceTempView(
+                    view_name
+                )
+
+                dataframe = result
+
+            # Return the complete Spark DataFrame.
+            
+            return dataframe
+
+        except AppException:
+            raise
 
         except Exception as exc:
             raise AppException(

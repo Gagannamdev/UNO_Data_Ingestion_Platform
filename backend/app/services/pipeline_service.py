@@ -1,30 +1,19 @@
 from datetime import datetime, timezone
 
-from app.constants.messages import (
-    ErrorMessages,
-    SuccessMessages,
-)
+from app.adapters.adapter_factory import get_adapter
+from app.constants.messages import ErrorMessages, SuccessMessages
 from app.enums.connection_enum import ConnectionAction
 from app.enums.pipeline_enum import PipelineStatus
-from app.exceptions.custom_exceptions import (
-    NotFoundException,
-)
-from app.repositories.connection_repository import (
-    ConnectionRepository,
-)
-from app.repositories.pipeline_repository import (
-    PipelineRepository,
-)
-from app.schema.models.pipeline_model import (
-    create_pipeline_document,
-)
-from app.schema.request_schema.connection_action_request import (
-    ConnectionActionRequest,
-)
+from app.exceptions.custom_exceptions import NotFoundException
+from app.repositories.connection_repository import ConnectionRepository
+from app.repositories.pipeline_repository import PipelineRepository
+from app.schema.models.pipeline_model import create_pipeline_document
+from app.schema.request_schema.connection_action_request import ConnectionActionRequest
 from app.services.connection_service import ConnectionService
 from app.services.spark.spark_service import SparkService
 from app.utils.cron_validator import CronValidator
 from app.utils.sql_validator import SQLValidator
+
 
 
 class PipelineService:
@@ -441,8 +430,10 @@ class PipelineService:
             )
         )
 
+        # ConnectionService returns a dictionary.
+        # Therefore use .get("data") instead of .data.
         source_rows = (
-            source_result.data or []
+            source_result.get("data") or []
         )
 
         steps = (
@@ -485,6 +476,243 @@ class PipelineService:
             ),
             "final_data": final_data,
         }
+
+    @staticmethod
+    async def execute_pipeline(
+        pipeline_id: str,
+        user_id: str,
+        role: str,
+    ) -> dict:
+
+
+        pipeline = (
+            await PipelineRepository.find_by_id(
+                pipeline_id
+            )
+        )
+
+        PipelineService.validate_access(
+            pipeline,
+            user_id,
+            role,
+        )
+
+        source = pipeline.get(
+            "source",
+            {},
+        )
+
+        transformation = pipeline.get(
+            "transformation",
+            {},
+        )
+
+        destination = pipeline.get(
+            "destination",
+            {},
+        )
+
+        source_connection_id = source[
+            "connection_id"
+        ]
+
+        source_object_name = source[
+            "object_name"
+        ]
+
+        destination_connection_id = destination[
+            "connection_id"
+        ]
+
+        destination_object_name = destination[
+            "object_name"
+        ]
+
+        write_mode = destination.get(
+            "write_mode",
+            "append",
+        )
+
+        source_connection = (
+            await PipelineService.validate_connection(
+                connection_id=source_connection_id,
+                user_id=user_id,
+                role=role,
+            )
+        )
+
+
+        source_config = (
+            ConnectionService.build_adapter_config(
+                source_connection
+            )
+        )
+
+        source_adapter = get_adapter(
+            source_connection[
+                "connection_type"
+            ],
+            source_config,
+        )
+
+
+        try:
+            source_rows = (
+                await source_adapter.read_data(
+                    source_object_name
+                )
+            )
+
+        except Exception:
+
+            await PipelineRepository.update(
+                pipeline_id,
+                {
+                    "last_run_status": "FAILED",
+                    "last_run_at": datetime.now(
+                        timezone.utc
+                    ),
+                },
+            )
+
+            raise
+
+        if not source_rows:
+
+            await PipelineRepository.update(
+                pipeline_id,
+                {
+                    "last_run_status": "FAILED",
+                    "last_run_at": datetime.now(
+                        timezone.utc
+                    ),
+                },
+            )
+
+            return {
+                "success": False,
+                "message": (
+                    "Pipeline source returned no data"
+                ),
+                "pipeline_id": pipeline_id,
+                "records_processed": 0,
+                "records_written": 0,
+                "status": "FAILED",
+            }
+
+
+        steps = transformation.get(
+            "steps",
+            [],
+        )
+
+        PipelineService.validate_transformations(
+            steps
+        )
+
+        try:
+
+            result_dataframe = (
+                SparkService.execute_steps(
+                    rows=source_rows,
+                    steps=steps,
+                )
+            )
+
+            transformed_rows = [
+                row.asDict()
+                for row in result_dataframe.collect()
+            ]
+
+        except Exception:
+
+            await PipelineRepository.update(
+                pipeline_id,
+                {
+                    "last_run_status": "FAILED",
+                    "last_run_at": datetime.now(
+                        timezone.utc
+                    ),
+                },
+            )
+
+            raise
+
+        destination_connection = (
+            await PipelineService.validate_connection(
+                connection_id=destination_connection_id,
+                user_id=user_id,
+                role=role,
+            )
+        )
+
+
+        destination_config = (
+            ConnectionService.build_adapter_config(
+                destination_connection
+            )
+        )
+
+        destination_adapter = get_adapter(
+            destination_connection[
+                "connection_type"
+            ],
+            destination_config,
+        )
+
+        try:
+
+            result = (
+                await destination_adapter.write_data(
+                    rows=transformed_rows,
+                    collection_name=destination_object_name,
+                    write_mode=write_mode,
+                )
+            )
+
+        except Exception:
+
+            await PipelineRepository.update(
+                pipeline_id,
+                {
+                    "last_run_status": "FAILED",
+                    "last_run_at": datetime.now(
+                        timezone.utc
+                    ),
+                },
+            )
+
+            raise
+
+        records_written = result.get(
+            "records_written",
+            0,
+        )
+
+        await PipelineRepository.update(
+            pipeline_id,
+            {
+                "last_run_status": "SUCCESS",
+                "last_run_at": datetime.now(
+                    timezone.utc
+                ),
+            },
+        )
+
+
+        return {
+            "success": True,
+            "message": (
+                "Pipeline executed successfully"
+            ),
+            "pipeline_id": pipeline_id,
+            "records_processed": len(
+                source_rows
+            ),
+            "records_written": records_written,
+            "status": "SUCCESS",
+        }
+
 
     @staticmethod
     def validate_access(

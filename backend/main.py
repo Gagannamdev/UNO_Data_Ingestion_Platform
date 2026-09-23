@@ -27,7 +27,6 @@ from app.routers.spark_router import (
 
 
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_to_mongodb()
